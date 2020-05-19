@@ -1,3 +1,5 @@
+![Rust](https://github.com/camorimd/wheel-rust/workflows/Rust/badge.svg)
+
 # Introduction
 This command line tool is a simple tool to let a Twitch streamer do a giveaway for his followers and viewers.
 To use this command line you will need to register an application in [Twitch Console](https://dev.twitch.tv) and
