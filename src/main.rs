@@ -22,7 +22,7 @@
     SOFTWARE.
 **/
 
-use log::{info, debug};
+use log::{info, debug, error};
 use clap::{crate_authors, crate_name, clap_app, crate_version, crate_description};
 use reqwest;
 use std::fs;
@@ -58,6 +58,8 @@ struct AccessToken {
 struct Token {
     access_token: String,
     client_id: String,
+    client_secret: String,
+    client_token: Option<String>
 }
 
 #[derive(Deserialize, Debug)]
@@ -76,9 +78,130 @@ struct FollowersData {
     pagination: Pagination,
     total: i32
 }
+#[derive(Deserialize, Debug, Clone)]
+struct Subscriptions{
+    user_name: String
+}
+#[derive(Deserialize, Debug)]
+struct SubscriptionData {
+    data: Vec<Subscriptions>,
+    pagination: Pagination
+}
+
 #[derive(Deserialize, Debug)]
 struct Pagination {
     cursor: Option<String>
+}
+
+fn open(url: String) {
+    use winapi::um::shellapi::ShellExecuteA;
+    use std::ptr;
+    use std::ffi::CString;
+
+    unsafe {
+        ShellExecuteA(
+            ptr::null_mut(),
+            CString::new("open").unwrap().as_ptr(),
+            CString::new(url).unwrap().as_ptr(),
+            ptr::null_mut(),
+            ptr::null_mut(), 
+            winapi::um::winuser::SW_SHOWNORMAL
+        );
+    }
+}
+
+async fn authenticate_user(client: &reqwest::Client, token: &mut Token) {
+    use std::net::{TcpListener};
+    use std::io::prelude::*;
+    use std::io::{BufReader, BufWriter};
+
+    let listener = TcpListener::bind("127.0.0.1:80").unwrap();
+    let mut code = String::from("");
+    open(format!("https://id.twitch.tv/oauth2/authorize?client_id={}&redirect_uri=http://localhost&response_type=code&scope=channel:read:subscriptions", token.client_id));
+    for stream in listener.incoming(){
+        match stream {
+            Ok(s) => {
+                let mut reader = BufReader::new(&s);
+                let mut writer = BufWriter::new(&s);
+                let mut content = [0; 512];
+                reader.read(&mut content).unwrap();
+                let request = String::from_utf8_lossy(&content);
+                writer.write(b"<html><head><title>Close Window</title></head><body><p>You can close this window now.</p></body></html>").unwrap();               
+                code = {
+                    use regex::Regex;
+                    let re = Regex::new(r".*code=(.*)&.*").unwrap();
+
+                    let a = &request.split("\n").map(|f| String::from(f)).collect::<Vec<String>>()[0];
+                    let a = &a.split(" ").map(|f| String::from(f)).collect::<Vec<String>>()[1];
+                    if re.is_match(a) {
+                        let m = re.captures(a).unwrap().get(1).unwrap();
+                        m.as_str().to_string()
+                    }else{
+                        a.clone()
+                    }
+                };
+
+                break;                
+            },
+            Err(x) => {
+                error!("Could not receive connection {}", x);
+            }
+        }
+    }
+    debug!("Code received {}", code);
+
+    let r = client.post(
+        &format!("https://id.twitch.tv/oauth2/token?client_id={}&client_secret={}&code={}&grant_type=authorization_code&redirect_uri=http://localhost",
+        token.client_id, token.client_secret, code)
+    ).send().await.unwrap().json::<AccessToken>().await.unwrap();
+
+    token.client_token = Some(r.access_token);
+}
+
+async fn get_subs(client: &reqwest::Client, token: &mut Token) -> Result<Vec<String>, reqwest::Error> {
+    let mut result = Vec::<String>::new();
+
+    if token.client_token.is_none() {
+        authenticate_user(client, token).await;
+    }
+
+    let url = format!("https://api.twitch.tv/helix/users");
+    let data = client.get(&url)
+        .bearer_auth(token.client_token.as_deref().unwrap())
+        .header("Client-Id", &token.client_id)
+        .send().await?
+        .json::<HashMap<String, Vec<Channel>>>().await?;
+
+    let mut url = format!("https://api.twitch.tv/helix/subscriptions?broadcaster_id={}&first=20", data.get("data").unwrap()[0].id);
+    let res = client.get(&url)
+                .bearer_auth(token.client_token.as_deref().unwrap())
+                .header("Client-Id", &token.client_id)
+                .send().await?.json::<SubscriptionData>().await?;
+
+    let mut cursor = match &res.pagination.cursor {
+        Some(p) => p.clone(),
+        None => String::from("")
+    };
+   
+
+    result.extend(res.data.iter().map(|f| {f.user_name.clone()}).collect::<Vec<String>>());
+
+    while cursor != "" && result.len() > 0{
+        url = format!("https://api.twitch.tv/helix/subscriptions?broadcaster_id={}&after={}&first=20", data.get("data").unwrap()[0].id, cursor);
+        let res = client.get(&url)
+                    .bearer_auth(token.client_token.as_deref().unwrap())
+                    .header("Client-Id", &token.client_id)
+                    .send().await?.json::<SubscriptionData>().await?;
+        
+        cursor = match &res.pagination.cursor {
+            Some(p) => p.clone(),
+            None => String::from("")
+        };
+
+        result.extend(res.data.iter().map(|f| {f.user_name.clone()}).collect::<Vec<String>>());
+    }
+    
+    Ok(result)
 }
 
 async fn authenticate(client: &reqwest::Client) -> Result<Token, reqwest::Error> {    
@@ -92,7 +215,9 @@ async fn authenticate(client: &reqwest::Client) -> Result<Token, reqwest::Error>
     let token = res.json::<AccessToken>().await?;
     Ok(Token {
         access_token: token.access_token,
-        client_id: String::from(app_file[0])
+        client_id: String::from(app_file[0]),
+        client_secret: String::from(app_file[1]),
+        client_token: None
     })
 }
 
@@ -152,14 +277,15 @@ async fn main() -> Result<(), reqwest::Error>{
         (version: crate_version!())
         (author: crate_authors!("\n"))
         (about: crate_description!())
-        (@arg drop_moderators: -d --drop-moderators "Drop moderators from giveaway")
+        (@arg drop_moderators: --drop "Drop moderators from giveaway")
         (@group modality =>
             (@attributes +required ...)
-            (@arg followers: -f --followers "Add followers to the giveaway")
-            (@arg viewers: -v --viewers "Add viewers to the giveaway")
-            (@arg subs: -s --subs "Add subs to the giveaway")
+            (@arg followers: --followers "Add followers to the giveaway")
+            (@arg viewers: --viewers "Add viewers to the giveaway")
+            (@arg subs: --subs "Add subs to the giveaway")
         )
         (@arg extra: -e --extra "Give viewers extra tickets")
+        (@arg discarded_file: --discarded +takes_value "Set a custom discarded file, default is discarded.txt")
         (@arg channel: +required "User channel")
     ).get_matches();
 
@@ -169,10 +295,11 @@ async fn main() -> Result<(), reqwest::Error>{
     let add_followers = matches.is_present("followers");
     let add_viewers = matches.is_present("viewers");
     let add_subs = matches.is_present("subs");
+    let discard_file_name = matches.value_of("discarded_file").unwrap_or("discarded.txt");
     
 
     let client = reqwest::Client::new();
-    let token = authenticate(&client).await?;
+    let mut token = authenticate(&client).await?;
    
 
     let mut tickets = Vec::<String>::new();
@@ -207,7 +334,7 @@ async fn main() -> Result<(), reqwest::Error>{
 
     //@TODO: add_subs
     if add_subs {
-        unimplemented!();
+        get_subs(&client, &mut token).await?;
     }
 
     tickets = tickets.into_iter().unique().collect();
@@ -223,7 +350,14 @@ async fn main() -> Result<(), reqwest::Error>{
     }
     
 
-    let content = fs::read_to_string("discarded.txt").expect("Error reading discarded file");
+    let content = match fs::read_to_string(discard_file_name) {
+        Ok(s) => s,
+        Err(_x) => {
+            info!("No discarded file has been selected");
+            String::from("")
+        }
+    };
+
     if drop_moderators { info!("Auto dropping moderators");}
     tickets.retain(|f| {
         let delete = {
