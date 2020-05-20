@@ -133,7 +133,16 @@ async fn get_followers(channel: &str, client: &reqwest::Client, token: &Token) -
     Ok(result)
 }
 
-// https://tmi.twitch.tv/group/user/trugesonfire/chatters
+fn pause () {
+    use std::io;
+    use std::io::Read;
+
+    let mut sdtin = io::stdin();
+    info!("Press any key to continue");
+
+    let _ = sdtin.read(&mut [0u8]).unwrap();
+}
+
 #[tokio::main]
 #[allow(deprecated)]
 async fn main() -> Result<(), reqwest::Error>{
@@ -144,10 +153,13 @@ async fn main() -> Result<(), reqwest::Error>{
         (author: crate_authors!("\n"))
         (about: crate_description!())
         (@arg drop_moderators: -d --drop-moderators "Drop moderators from giveaway")
-        (@arg followers: -f --followers "Add followers to the giveaway")
-        (@arg viewers: -v --viewers "Add viewers to the giveaway")
+        (@group modality =>
+            (@attributes +required ...)
+            (@arg followers: -f --followers "Add followers to the giveaway")
+            (@arg viewers: -v --viewers "Add viewers to the giveaway")
+            (@arg subs: -s --subs "Add subs to the giveaway")
+        )
         (@arg extra: -e --extra "Give viewers extra tickets")
-        (@arg subs: -s --subs "Add subs to the giveaway")
         (@arg channel: +required "User channel")
     ).get_matches();
 
@@ -169,12 +181,12 @@ async fn main() -> Result<(), reqwest::Error>{
 
     if extra_tickets || drop_moderators || add_viewers {
         info!("Downloading viewers and moderators");
-        let body = reqwest::get("https://tmi.twitch.tv/group/user/trugesonfire/chatters")
+        let body = reqwest::get(&format!("https://tmi.twitch.tv/group/user/{}/chatters", &channel))
             .await?
             .json::<Chat>()
             .await?;
-        viewers.extend(body.chatters.viewers);
-        moderators.extend(body.chatters.moderators);
+        viewers.extend(body.chatters.viewers.iter().map(|f| f.trim_end().to_uppercase().to_string()));
+        moderators.extend(body.chatters.moderators.iter().map(|f| f.trim_end().to_uppercase().to_string()));
     }
      
 
@@ -200,14 +212,13 @@ async fn main() -> Result<(), reqwest::Error>{
 
     tickets = tickets.into_iter().unique().collect();
 
-
     if extra_tickets {
         info!("Adding extra tiquets for viewers");
-        for v in &viewers {
-            tickets.push(v.to_uppercase().to_string());
-        }
-        for v in &moderators {
-            tickets.push(v.to_uppercase().to_string());
+        for v in viewers.iter().chain(moderators.iter()) {
+            if tickets.contains(&v) {
+                info!("{} extra ticket", &v);
+                tickets.push(v.to_uppercase().to_string());
+            }
         }
     }
     
@@ -244,11 +255,10 @@ async fn main() -> Result<(), reqwest::Error>{
     });
 
     let mut rng = thread_rng();
-
-    
-    let grouped_tickets = tickets.iter().group_by(|&f| f);
+    let grouped_tickets = tickets.iter().sorted().group_by(|&f| f);
     info!("{:?}", grouped_tickets.into_iter().map(|(key, group)| (key.clone(), group.count())).collect::<HashMap<String, usize>>());
 
+    pause();
 
     if cfg!(feature = "distribution")
     {
