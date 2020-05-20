@@ -1,4 +1,4 @@
-![Rust](https://github.com/camorimd/wheel-rust/workflows/Rust/badge.svg)
+![GitHub issues](https://img.shields.io/github/issues/camorimd/wheel-rust)
 
 # Introduction
 This command line tool is a simple tool to let a Twitch streamer do a giveaway for his followers and viewers.
@@ -15,7 +15,7 @@ Claudio Amorim <camorimd@gmail.com>
 A simple tool to let Twitch Streamers do giveaways
 
 USAGE:
-    wheel.exe [FLAGS] <channel>
+    wheel.exe [FLAGS] <channel> <--followers|--viewers|--subs>
 
 FLAGS:
     -m, --drop         Drop moderators from giveaway
@@ -44,6 +44,10 @@ ARGS:
 # Roadmap
 * let the user be able to select subs for the giveaway
 * Let the program write in the stream chat the result of the giveaway
+* The discard file should be optional
+* The app file should be configurable
+* Better error handling in files
+* Let the user select how many extra tickets he wants to add to the viewers
 
 
 # License
